@@ -12,9 +12,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 3.11 is the floor (`contextlib.aclosing`, `zip(strict=)`); 3.12 is
-        # what a freshly-installed Termux gives you today.
-        python-version: ["3.11", "3.12"]
+        # 3.11 is the floor (`contextlib.aclosing`, `zip(strict=)`). 3.14 is
+        # the one that matters: a current Termux install reports SOABI
+        # cpython-314-aarch64-linux-android, so that is what this actually
+        # runs on in production. Testing only the versions that were
+        # convenient left the target platform uncovered.
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
 
     steps:
       - uses: actions/checkout@v4
