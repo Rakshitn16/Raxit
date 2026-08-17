@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0d12">
+<title>Raxit</title>
+<style>
+  :root {
+    --bg: #0b0d12; --panel: #141821; --line: #232936;
+    --text: #e6e9ef; --dim: #8b93a5; --accent: #5eead4; --warn: #fbbf24; --err: #f87171;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); height: 100dvh;
+         display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: .75rem; padding: .85rem 1rem;
+           border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font-size: 1.05rem; margin: 0; letter-spacing: .04em; }
+  .dot { width: .55rem; height: .55rem; border-radius: 50%; background: var(--err);
+         transition: background .3s; }
+  .dot.live { background: var(--accent); }
+  header .spacer { flex: 1; }
+  header button { background: none; border: 1px solid var(--line); color: var(--dim);
+                  border-radius: .5rem; padding: .35rem .7rem; font-size: .8rem; }
+
+  #log { flex: 1; overflow-y: auto; padding: 1rem; display: flex;
+         flex-direction: column; gap: .7rem; }
+  .msg { max-width: 46rem; padding: .7rem .9rem; border-radius: .8rem; line-height: 1.5;
+         white-space: pre-wrap; word-wrap: break-word; }
+  .user { align-self: flex-end; background: #1e3a4a; }
+  .bot  { align-self: flex-start; background: var(--panel); }
+  .tool { align-self: flex-start; font-size: .8rem; color: var(--dim);
+          background: transparent; border-left: 2px solid var(--line); border-radius: 0;
+          padding: .2rem .7rem; }
+  .tool.err { color: var(--err); border-color: var(--err); }
+  .think { align-self: flex-start; font-size: .8rem; color: var(--dim);
+           font-style: italic; background: transparent; padding: .2rem .7rem; }
+
+  .approve { align-self: flex-start; background: #2a2410; border: 1px solid var(--warn);
+             border-radius: .8rem; padding: .8rem; font-size: .85rem; max-width: 34rem; }
+  .approve code { display: block; margin: .5rem 0; color: var(--warn);
+                  font-size: .78rem; overflow-x: auto; }
+  .approve button { margin-right: .5rem; padding: .35rem .9rem; border-radius: .5rem;
+                    border: none; font-weight: 600; }
+  .yes { background: var(--accent); color: #05201c; }
+  .no  { background: #3a2020; color: var(--text); }
+
+  footer { display: flex; gap: .5rem; padding: .75rem; border-top: 1px solid var(--line);
+           background: var(--panel); padding-bottom: max(.75rem, env(safe-area-inset-bottom)); }
+  #input { flex: 1; background: var(--bg); border: 1px solid var(--line); color: var(--text);
+           border-radius: .7rem; padding: .7rem .9rem; font-size: 1rem; resize: none;
+           max-height: 8rem; font-family: inherit; }
+  footer button { border: none; border-radius: .7rem; padding: 0 1.1rem; font-size: 1rem;
+                  background: var(--accent); color: #05201c; font-weight: 600; }
+  #mic { background: var(--line); color: var(--text); }
+  #mic.on { background: var(--err); color: #fff; }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="dot"></span>
+  <h1>RAXIT</h1>
+  <span class="spacer"></span>
+  <button id="clear">Clear</button>
+</header>
+
+<div id="log"></div>
+
+<footer>
+  <button id="mic" title="Voice input">&#127908;</button>
+  <textarea id="input" rows="1" placeholder="Ask Raxit&hellip;"></textarea>
+  <button id="send">Send</button>
+</footer>
+
+<script>
+const log = document.getElementById('log');
+const input = document.getElementById('input');
+const dot = document.getElementById('dot');
+const SESSION = 'default';
+let ws, current = null;
+
+function el(cls, text) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + cls;
+  if (text !== undefined) d.textContent = text;
+  log.appendChild(d);
+  log.scrollTop = log.scrollHeight;
+  return d;
+}
+
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => dot.classList.add('live');
+  ws.onclose = () => { dot.classList.remove('live'); setTimeout(connect, 2000); };
+  ws.onmessage = (ev) => handle(JSON.parse(ev.data));
+}
+
+function handle({ type, data }) {
+  if (type === 'text') {
+    // Deltas arrive token by token; append into one bubble per reply.
+    if (!current) current = el('bot', '');
+    current.textContent += data.text;
+    log.scrollTop = log.scrollHeight;
+  } else if (type === 'thinking') {
+    // Fires only while the model reasons; cleared when real text starts.
+  } else if (type === 'tool_result') {
+    const line = el('tool' + (data.is_error ? ' err' : ''),
+                    `${data.name} → ${String(data.output).slice(0, 200)}`);
+    line.title = JSON.stringify(data.input);
+    current = null;   // a new bubble follows the tool round
+  } else if (type === 'approval_request') {
+    askApproval(data);
+  } else if (type === 'done') {
+    current = null;
+  } else if (type === 'error') {
+    el('tool err', data.message);
+    current = null;
+  }
+}
+
+function askApproval({ name, input }) {
+  const box = document.createElement('div');
+  box.className = 'msg approve';
+  box.innerHTML = `<strong>${name}</strong> needs your approval.
+    <code>${escapeHtml(JSON.stringify(input, null, 2))}</code>`;
+  const yes = Object.assign(document.createElement('button'),
+                            { className: 'yes', textContent: 'Allow' });
+  const no = Object.assign(document.createElement('button'),
+                           { className: 'no', textContent: 'Deny' });
+  const answer = (approved) => {
+    ws.send(JSON.stringify({ type: 'approval', approved }));
+    box.innerHTML = `<strong>${name}</strong> ${approved ? 'allowed' : 'denied'}.`;
+  };
+  yes.onclick = () => answer(true);
+  no.onclick = () => answer(false);
+  box.append(yes, no);
+  log.appendChild(box);
+  log.scrollTop = log.scrollHeight;
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function send() {
+  const text = input.value.trim();
+  if (!text || ws.readyState !== WebSocket.OPEN) return;
+  el('user', text);
+  ws.send(JSON.stringify({ message: text, session: SESSION }));
+  input.value = '';
+  input.style.height = 'auto';
+  current = null;
+}
+
+document.getElementById('send').onclick = send;
+input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+});
+input.addEventListener('input', () => {
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 128) + 'px';
+});
+
+document.getElementById('clear').onclick = async () => {
+  await fetch(`/api/session/${SESSION}/clear`, { method: 'POST' });
+  log.innerHTML = '';
+  current = null;
+};
+
+// Browser speech recognition, where available. The agent also has a
+// server-side `listen` tool that works when this does not.
+const Recog = window.SpeechRecognition || window.webkitSpeechRecognition;
+const mic = document.getElementById('mic');
+if (Recog) {
+  const rec = new Recog();
+  rec.continuous = false;
+  rec.interimResults = false;
+  let listening = false;
+  mic.onclick = () => { listening ? rec.stop() : rec.start(); };
+  rec.onstart = () => { listening = true; mic.classList.add('on'); };
+  rec.onend = () => { listening = false; mic.classList.remove('on'); };
+  rec.onresult = (e) => { input.value = e.results[0][0].transcript; send(); };
+} else {
+  mic.disabled = true;
+  mic.title = 'Speech recognition unavailable in this browser';
+}
+
+connect();
+</script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+name: morning_brief
+cron: "0 7 * * *"
+enabled: true
+effort: low
+prompt: |
+  Good morning. Put together a short spoken brief for the day:
+
+  - Check the date and the tablet's battery.
+  - Recall anything stored about today's plans or recurring commitments.
+  - Read out any notifications that arrived overnight and look important.
+
+  Speak it aloud in under 30 seconds of audio, then post the same thing as a
+  notification so it can be re-read later. Skip anything you have nothing to
+  say about — a shorter brief is a better brief.
