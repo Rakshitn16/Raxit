@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import memory, tools
+from . import llm, memory, tools
 from .agent import Agent
 from .config import HOST, PORT, WEB_DIR, settings
 from .routines import RoutineRunner
@@ -39,6 +39,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         runner.stop()
+        await llm.aclose()
 
 
 app = FastAPI(title="Raxit", lifespan=lifespan)
@@ -58,7 +59,8 @@ async def index() -> FileResponse:
 async def status() -> dict[str, Any]:
     return {
         "model": settings.model,
-        "effort": settings.effort,
+        "thinking": settings.enable_thinking,
+        "base_url": settings.base_url,
         "tools": sorted(tools.REGISTRY),
         "routines": runner.describe(),
         "events": memory.recent_events(30),

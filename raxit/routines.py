@@ -31,7 +31,9 @@ class Routine:
     prompt: str
     cron: str
     enabled: bool = True
-    effort: str = "low"
+    # Nemotron's reasoning pass: worth it for a routine that plans several
+    # steps, wasted latency on one that just reads a sensor.
+    thinking: bool = True
     session: str = "routines"
 
     @classmethod
@@ -45,7 +47,7 @@ class Routine:
             prompt=raw["prompt"],
             cron=raw["cron"],
             enabled=raw.get("enabled", True),
-            effort=raw.get("effort", "low"),
+            thinking=raw.get("thinking", True),
             session=raw.get("session", "routines"),
         )
 
@@ -100,7 +102,7 @@ class RoutineRunner:
             async for event in self.agent.run(
                 routine.session,
                 routine.prompt,
-                effort=routine.effort,
+                thinking=routine.thinking,
                 unattended=True,
             ):
                 if event.type == "done":

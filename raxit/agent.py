@@ -1,23 +1,27 @@
-"""The agent loop: Claude plans, the tablet acts.
+"""The agent loop: the model plans, the tablet acts.
 
-This is a hand-written tool loop rather than the SDK's tool runner, because
-every step has to be streamed to the web UI as it happens and dangerous tools
-have to be intercepted *before* they execute. The runner's per-turn hooks could
-cover the second half, but the loop stays explicit so the event stream and the
-approval gate live in one readable place.
+A hand-written tool loop rather than a framework, because two things have to
+happen inline: every step is streamed to the web UI as it occurs, and dangerous
+tools are intercepted *before* they execute.
+
+The wire format is OpenAI's (NVIDIA NIM speaks it), which shapes the loop:
+a tool round is an `assistant` message carrying `tool_calls`, followed by one
+`tool` message per call. Those must stay adjacent and complete or the API
+rejects the history.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable
 
-import anthropic
-
-from . import memory, tools
+from . import llm, memory, tools
 from .config import settings
+
+log = logging.getLogger("raxit.agent")
 
 SYSTEM_PROMPT = """\
 You are Raxit, a voice-and-text assistant living on {owner}'s Samsung Galaxy \
@@ -29,17 +33,23 @@ clipboard, camera, torch, location, and a restricted shell. Prefer doing the \
 thing over describing how to do it. When a request maps onto a tool, call it.
 
 Ground yourself before acting. You have no innate sense of the current time, \
-the device's state, or what you were told last week — call `now`, `battery`, \
+the device's state, or what you were told last week — call `now`, `battery` \
 and `recall` rather than guessing at any of them.
 
 You persist across sessions. When you learn something durable about {owner} — \
 a preference, a schedule, a name, a recurring annoyance — store it with \
 `remember` so the next conversation starts warmer than this one did.
 
-You often run unattended, fired by a routine at 7am with nobody watching. In \
-that mode nobody can answer a clarifying question, so make the reasonable call \
-and deliver the result through `notify` or `speak`. Save questions for when \
-someone is actually in the conversation with you.
+You often run unattended, fired by a routine at 7am with nobody watching. \
+Nobody can answer a clarifying question in that mode, so make the reasonable \
+call and deliver the result through `notify` or `speak`. Save questions for \
+when someone is actually in the conversation with you.
+
+When a tool fails, report the failure and carry on with the rest of the \
+request. Do not improvise a workaround through the shell — a tool that is \
+unavailable stays unavailable, and hunting for a back door burns the request \
+budget without answering the question. One retry is reasonable if the error \
+reads as transient; a second is not.
 
 Keep spoken replies to a sentence or two — they are heard, not skimmed, and a \
 paragraph read aloud is punishing. Written replies can be longer when the \
@@ -55,24 +65,14 @@ what was asked — don't quietly widen it or substitute your own plan.
 class Event:
     """One thing that happened, streamed to whoever is watching."""
 
-    type: str  # text | thinking | tool_use | tool_result | done | error
+    type: str  # text | thinking | tool_result | done | error
     data: dict[str, Any]
 
 
-class ApprovalRequired(Exception):
-    """Raised when a dangerous tool needs a human before it runs."""
-
-    def __init__(self, tool_name: str, payload: dict[str, Any]) -> None:
-        super().__init__(f"{tool_name} requires approval")
-        self.tool_name = tool_name
-        self.payload = payload
-
-
 class Agent:
-    def __init__(self, client: anthropic.AsyncAnthropic | None = None) -> None:
-        self.client = client or anthropic.AsyncAnthropic()
+    def __init__(self) -> None:
         self.system = SYSTEM_PROMPT.format(owner=settings.owner_name)
-        # Tool names the user has pre-approved for this process lifetime.
+        # Tools the user has blanket-approved for this process lifetime.
         self.approved: set[str] = set()
 
     async def run(
@@ -80,58 +80,42 @@ class Agent:
         session: str,
         user_input: str,
         *,
-        effort: str | None = None,
         unattended: bool = False,
-        approve: Callable[[str, dict[str, Any]], bool] | None = None,
+        thinking: bool | None = None,
+        approve: Callable[[str, dict[str, Any]], Any] | None = None,
     ) -> AsyncIterator[Event]:
         """Drive one exchange to completion, yielding events as they occur.
 
-        `approve` is consulted before any tool marked dangerous. Returning
-        False turns into an error tool_result, which Claude reads and routes
-        around rather than retrying blindly.
+        `approve` is consulted before any tool marked dangerous. A refusal
+        becomes an error tool result, which the model reads and routes around
+        rather than retrying blindly.
         """
-        memory.append_message(session, "user", user_input)
-        messages = memory.load_messages(session)
+        memory.append_message(session, user_input_message(user_input))
+        history = memory.load_messages(session)
+        messages = [{"role": "system", "content": self.system}, *history]
 
         for _ in range(settings.max_tool_iterations):
-            async with self.client.messages.stream(
-                model=settings.model,
-                max_tokens=settings.max_tokens,
-                system=[
-                    {
-                        "type": "text",
-                        "text": self.system,
-                        # The system prompt and tool schemas are byte-stable
-                        # across every turn, so cache them once and read them
-                        # back for a tenth of the price on each subsequent call.
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ],
-                thinking={"type": "adaptive", "display": "summarized"},
-                output_config={"effort": effort or settings.effort},
-                tools=tools.definitions(),
-                messages=messages,
-            ) as stream:
-                async for chunk in stream:
-                    if chunk.type != "content_block_delta":
-                        continue
-                    if chunk.delta.type == "text_delta":
-                        yield Event("text", {"text": chunk.delta.text})
-                    elif chunk.delta.type == "thinking_delta":
-                        yield Event("thinking", {"text": chunk.delta.thinking})
-
-                response = await stream.get_final_message()
-
-            memory.append_message(session, "assistant", response.content)
-            messages.append({"role": "assistant", "content": response.content})
-
-            if response.stop_reason == "refusal":
-                yield Event("error", {"message": "The model declined this request."})
+            collector = llm.StreamCollector()
+            try:
+                async for delta in llm.stream_deltas(
+                    messages, tools.definitions(), collector, thinking=thinking
+                ):
+                    if "reasoning" in delta:
+                        yield Event("thinking", {"text": delta["reasoning"]})
+                    if "text" in delta:
+                        yield Event("text", {"text": delta["text"]})
+            except Exception as exc:
+                log.exception("completion failed")
+                yield Event("error", {"message": str(exc)})
                 return
 
-            calls = [b for b in response.content if b.type == "tool_use"]
+            assistant = collector.assistant_message()
+            memory.append_message(session, assistant)
+            messages.append(assistant)
+
+            calls = assistant.get("tool_calls")
             if not calls:
-                yield Event("done", {"text": _text_of(response)})
+                yield Event("done", {"text": llm.strip_reasoning(collector.text)})
                 return
 
             results = await self._execute(calls, unattended=unattended, approve=approve)
@@ -139,78 +123,131 @@ class Agent:
                 yield Event(
                     "tool_result",
                     {
-                        "name": call.name,
-                        "input": call.input,
+                        "name": call["function"]["name"],
+                        "input": call["function"]["arguments"],
                         "output": result["content"],
-                        "is_error": result.get("is_error", False),
+                        "is_error": result.pop("_error", False),
                     },
                 )
+                memory.append_message(session, result)
+                messages.append(result)
 
-            memory.append_message(session, "user", results)
-            messages.append({"role": "user", "content": results})
+        # Out of tool rounds. Rather than dropping everything on the floor,
+        # make one final pass with no tools offered, so the user still gets an
+        # answer built from whatever the loop did manage to gather.
+        async for event in self._forced_answer(session, messages, thinking):
+            yield event
 
+    async def _forced_answer(
+        self,
+        session: str,
+        messages: list[dict[str, Any]],
+        thinking: bool | None,
+    ) -> AsyncIterator[Event]:
         yield Event(
-            "error",
-            {"message": f"Stopped after {settings.max_tool_iterations} tool rounds."},
+            "notice",
+            {
+                "message": f"Hit the {settings.max_tool_iterations}-round tool "
+                "limit; summarising what I have."
+            },
         )
+        messages = [
+            *messages,
+            {
+                "role": "user",
+                "content": (
+                    "You have run out of tool calls for this turn. Answer now "
+                    "using only what you already gathered, and say plainly "
+                    "which parts you could not complete."
+                ),
+            },
+        ]
+        collector = llm.StreamCollector()
+        try:
+            async for delta in llm.stream_deltas(
+                messages, None, collector, thinking=thinking
+            ):
+                if "text" in delta:
+                    yield Event("text", {"text": delta["text"]})
+        except Exception as exc:
+            yield Event("error", {"message": str(exc)})
+            return
+
+        final = collector.assistant_message()
+        memory.append_message(session, final)
+        yield Event("done", {"text": llm.strip_reasoning(collector.text)})
 
     async def _execute(
         self,
-        calls: list[Any],
+        calls: list[dict[str, Any]],
         *,
         unattended: bool,
-        approve: Callable[[str, dict[str, Any]], bool] | None,
+        approve: Callable[[str, dict[str, Any]], Any] | None,
     ) -> list[dict[str, Any]]:
-        """Run every tool call in one assistant turn, concurrently.
+        """Run every tool call from one assistant turn, concurrently.
 
-        Claude may request several tools at once; the API requires all of their
-        results back in a single user message, so gather rather than serialize.
+        Nemotron usually emits calls one at a time, but the format permits
+        several per turn and each needs its own `tool` reply, so gather rather
+        than assume a single call.
         """
 
-        async def one(call: Any) -> dict[str, Any]:
-            entry = tools.REGISTRY.get(call.name)
-            if entry is None:
-                return _result(call.id, f"No such tool: {call.name}", error=True)
-
-            if entry.dangerous and call.name not in self.approved:
-                allowed = False
-                if approve is not None:
-                    allowed = await _maybe_await(approve(call.name, dict(call.input)))
-                if not allowed:
-                    reason = (
-                        "declined by the user"
-                        if not unattended
-                        else "blocked: this tool needs a human and nobody is watching"
-                    )
-                    return _result(call.id, f"{call.name} {reason}.", error=True)
+        async def one(call: dict[str, Any]) -> dict[str, Any]:
+            name = call["function"]["name"]
+            call_id = call["id"]
 
             try:
-                output = await tools.invoke(call.name, dict(call.input))
-                memory.log_event("tool", f"{call.name} {json.dumps(dict(call.input))[:200]}")
-                return _result(call.id, output)
-            except Exception as exc:  # surfaced to Claude, not swallowed
-                memory.log_event("tool_error", f"{call.name}: {exc}")
-                return _result(call.id, f"{type(exc).__name__}: {exc}", error=True)
+                payload = json.loads(call["function"]["arguments"] or "{}")
+            except json.JSONDecodeError as exc:
+                return _tool_result(
+                    call_id, f"Could not parse arguments as JSON: {exc}", error=True
+                )
+            if not isinstance(payload, dict):
+                return _tool_result(
+                    call_id, "Arguments must be a JSON object.", error=True
+                )
+
+            entry = tools.REGISTRY.get(name)
+            if entry is None:
+                return _tool_result(call_id, f"No such tool: {name}", error=True)
+
+            if entry.dangerous and name not in self.approved:
+                allowed = False
+                if approve is not None:
+                    allowed = await _maybe_await(approve(name, payload))
+                if not allowed:
+                    reason = (
+                        "blocked: this tool needs a human and nobody is watching"
+                        if unattended
+                        else "declined by the user"
+                    )
+                    return _tool_result(call_id, f"{name} {reason}.", error=True)
+
+            try:
+                output = await tools.invoke(name, payload)
+                memory.log_event("tool", f"{name} {json.dumps(payload)[:200]}")
+                return _tool_result(call_id, output)
+            except Exception as exc:  # surfaced to the model, not swallowed
+                memory.log_event("tool_error", f"{name}: {exc}")
+                return _tool_result(call_id, f"{type(exc).__name__}: {exc}", error=True)
 
         return list(await asyncio.gather(*(one(c) for c in calls)))
 
 
-def _result(tool_use_id: str, content: str, *, error: bool = False) -> dict[str, Any]:
-    block: dict[str, Any] = {
-        "type": "tool_result",
-        "tool_use_id": tool_use_id,
+def user_input_message(text: str) -> dict[str, Any]:
+    return {"role": "user", "content": text}
+
+
+def _tool_result(call_id: str, content: str, *, error: bool = False) -> dict[str, Any]:
+    # `_error` is a local display flag, popped before the message is replayed.
+    return {
+        "role": "tool",
+        "tool_call_id": call_id,
         "content": content,
+        "_error": error,
     }
-    if error:
-        block["is_error"] = True
-    return block
-
-
-def _text_of(response: Any) -> str:
-    return "".join(b.text for b in response.content if b.type == "text").strip()
 
 
 async def _maybe_await(value: Any) -> Any:
     if asyncio.iscoroutine(value):
         return await value
-    return value
+    return bool(value)

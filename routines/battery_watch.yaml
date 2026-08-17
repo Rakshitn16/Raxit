@@ -1,7 +1,7 @@
 name: battery_watch
 cron: "*/30 * * * *"
 enabled: true
-effort: low
+thinking: false
 prompt: |
   Check the battery. If it is below 20% and not charging, notify with high
   priority and say so out loud. If it is above 20%, or it is charging, do

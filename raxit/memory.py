@@ -64,27 +64,27 @@ def init() -> None:
 # --- conversation transcript -------------------------------------------------
 
 
-def append_message(session: str, role: str, content: Any) -> None:
+def append_message(session: str, message: dict[str, Any]) -> None:
+    """Persist one OpenAI-format message (`user`, `assistant` or `tool`)."""
     with connect() as conn:
         conn.execute(
             "INSERT INTO messages (session, role, content, created) VALUES (?,?,?,?)",
-            (session, role, json.dumps(content, default=_blockify), time.time()),
+            (session, message["role"], json.dumps(message), time.time()),
         )
 
 
-def load_messages(session: str, limit: int = 200) -> list[dict[str, Any]]:
-    """Return the tail of a session as Messages-API `messages` entries.
+def load_messages(session: str, limit: int = 120) -> list[dict[str, Any]]:
+    """Return the tail of a session, trimmed to a shape the API will accept.
 
-    The tail is taken by id and then re-ordered, so the newest `limit` turns
-    are kept rather than the oldest.
+    The newest `limit` messages are kept rather than the oldest, then repaired
+    at both ends — see `_repair`.
     """
     with connect() as conn:
         rows = conn.execute(
-            "SELECT role, content FROM messages WHERE session=? ORDER BY id DESC LIMIT ?",
+            "SELECT content FROM messages WHERE session=? ORDER BY id DESC LIMIT ?",
             (session, limit),
         ).fetchall()
-    msgs = [{"role": r["role"], "content": json.loads(r["content"])} for r in reversed(rows)]
-    return _trim_to_valid_start(msgs)
+    return _repair([json.loads(r["content"]) for r in reversed(rows)])
 
 
 def clear_session(session: str) -> None:
@@ -92,32 +92,35 @@ def clear_session(session: str) -> None:
         conn.execute("DELETE FROM messages WHERE session=?", (session,))
 
 
-def _trim_to_valid_start(msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Drop leading turns until the history starts on a `user` message.
+def _repair(msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Make a message-list slice replayable.
 
-    A tail slice can begin mid-exchange — on an assistant turn, or on a user
-    turn holding `tool_result` blocks whose matching `tool_use` was cut off.
-    Either shape is a 400 from the API, so skip forward to the first plain
-    user turn.
+    Two ways a stored history goes invalid, both rejected by the API:
+
+    * The head is cut mid-tool-round, so the slice opens on a `tool` message
+      whose originating `assistant` turn was left behind. Fix by skipping
+      forward to the first `user` message.
+    * The tail is an `assistant` turn with `tool_calls` that never got their
+      `tool` replies — what a crash mid-loop leaves behind. Fix by dropping
+      the dangling turn.
     """
-    for i, m in enumerate(msgs):
-        if m["role"] != "user":
-            continue
-        content = m["content"]
-        if isinstance(content, str):
-            return msgs[i:]
-        if not any(
-            isinstance(b, dict) and b.get("type") == "tool_result" for b in content
-        ):
-            return msgs[i:]
-    return []
+    start = next((i for i, m in enumerate(msgs) if m.get("role") == "user"), None)
+    if start is None:
+        return []
+    msgs = msgs[start:]
 
+    while msgs:
+        last = msgs[-1]
+        if last.get("role") != "assistant" or not last.get("tool_calls"):
+            break
+        answered = {
+            m.get("tool_call_id") for m in msgs if m.get("role") == "tool"
+        }
+        if all(c["id"] in answered for c in last["tool_calls"]):
+            break
+        msgs.pop()
 
-def _blockify(obj: Any) -> Any:
-    """Serialize SDK content-block objects (Pydantic models) to plain dicts."""
-    if hasattr(obj, "model_dump"):
-        return obj.model_dump(exclude_none=True)
-    return str(obj)
+    return msgs
 
 
 # --- long-term facts ---------------------------------------------------------
@@ -135,21 +138,40 @@ def remember(key: str, value: str, tags: str = "") -> None:
 
 
 def recall(query: str = "", limit: int = 25) -> list[dict[str, str]]:
-    like = f"%{query}%"
+    """Search stored facts, ranked by how many query words match.
+
+    Matching is per-word rather than on the whole phrase, and treats `_`, `-`
+    and spaces as the same character. The model writes keys like
+    `favourite_drink` but later searches for "favourite drink", and a plain
+    substring match silently returns nothing for that — a memory that quietly
+    fails to recall is worse than no memory at all.
+    """
     with connect() as conn:
-        if query:
-            rows = conn.execute(
-                """SELECT key, value, tags FROM facts
-                   WHERE key LIKE ? OR value LIKE ? OR tags LIKE ?
-                   ORDER BY updated DESC LIMIT ?""",
-                (like, like, like, limit),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT key, value, tags FROM facts ORDER BY updated DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
-    return [dict(r) for r in rows]
+        rows = conn.execute(
+            "SELECT key, value, tags, updated FROM facts ORDER BY updated DESC"
+        ).fetchall()
+
+    words = [w for w in _normalize(query).split() if len(w) > 1]
+    if not words:
+        return [_fact(r) for r in rows[:limit]]
+
+    scored = []
+    for row in rows:
+        haystack = _normalize(f"{row['key']} {row['value']} {row['tags']}")
+        hits = sum(1 for w in words if w in haystack)
+        if hits:
+            scored.append((hits, row["updated"], row))
+
+    scored.sort(key=lambda s: (-s[0], -s[1]))
+    return [_fact(row) for _, _, row in scored[:limit]]
+
+
+def _normalize(text: str) -> str:
+    return text.lower().replace("_", " ").replace("-", " ").replace(",", " ")
+
+
+def _fact(row: Any) -> dict[str, str]:
+    return {"key": row["key"], "value": row["value"], "tags": row["tags"]}
 
 
 def forget(key: str) -> bool:

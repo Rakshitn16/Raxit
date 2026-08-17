@@ -2,7 +2,7 @@
 
 A tool is a Python callable plus a JSON Schema. `@tool` registers both, so
 adding a capability to Raxit means writing one function — the schema sent to
-Claude and the dispatch table stay in sync automatically.
+the model and the dispatch table stay in sync automatically.
 """
 
 from __future__ import annotations
@@ -24,10 +24,14 @@ class Tool:
     dangerous: bool = False
 
     def definition(self) -> dict[str, Any]:
+        """The OpenAI function-calling schema, as NVIDIA NIM expects it."""
         return {
-            "name": self.name,
-            "description": self.description,
-            "input_schema": self.input_schema,
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.input_schema,
+            },
         }
 
 
@@ -56,7 +60,7 @@ async def invoke(name: str, payload: dict[str, Any]) -> str:
     """Run a tool and return its result as text.
 
     Failures are returned rather than raised: the caller marks them
-    `is_error` so Claude can read the message and try another approach.
+    `is_error` so the model can read the message and try another approach.
     """
     entry = REGISTRY.get(name)
     if entry is None:

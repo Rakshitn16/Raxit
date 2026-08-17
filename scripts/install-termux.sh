@@ -22,7 +22,7 @@ pip install -r requirements.txt
 
 if [ ! -f .env ]; then
   cp .env.example .env
-  echo "==> Wrote .env — add your ANTHROPIC_API_KEY before starting."
+  echo "==> Wrote .env — add your NVIDIA_API_KEY before starting."
 fi
 
 echo "==> Verifying the Termux:API bridge"
@@ -36,7 +36,8 @@ cat <<'EOF'
 
 Setup complete.
 
-  1. Put your key in .env:      ANTHROPIC_API_KEY=sk-ant-...
+  1. Free key from https://build.nvidia.com (no card), into .env:
+                                NVIDIA_API_KEY=nvapi-...
   2. Keep Termux alive:         termux-wake-lock
   3. Start Raxit:               ./scripts/run.sh
   4. Open the tablet browser:   http://127.0.0.1:8788
