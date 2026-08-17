@@ -1,8 +1,10 @@
 name: CI
 
 on:
+  # Every branch, not just main and open PRs. Work pushed to a branch with no
+  # PR attached was getting no CI at all, which is exactly when you least want
+  # to find out the target Python version broke something.
   push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
 
