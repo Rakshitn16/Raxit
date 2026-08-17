@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is the floor (`contextlib.aclosing`, `zip(strict=)`); 3.12 is
+        # what a freshly-installed Termux gives you today.
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check raxit tests
+
+      - name: Test
+        # No API key in the environment: the suite must never reach a real
+        # endpoint, and a test that would is a test that fails here.
+        run: pytest --cov=raxit --cov-report=term-missing
+
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shellcheck the install and run scripts
+        # These only ever execute on a tablet, where a syntax error surfaces
+        # as a half-finished install with no Python and no venv.
+        run: shellcheck --shell=bash scripts/*.sh

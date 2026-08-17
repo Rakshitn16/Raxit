@@ -1,0 +1,9 @@
+# Test and lint tooling. Not installed on the tablet — install-termux.sh reads
+# requirements.txt only, and pytest on a Helio G99 is not how anyone wants to
+# spend their afternoon.
+-r requirements.txt
+
+pytest>=8.3.0
+pytest-asyncio>=0.24.0
+pytest-cov>=5.0.0
+ruff>=0.6.0
