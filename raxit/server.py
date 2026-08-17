@@ -19,9 +19,10 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import llm, memory, tools
+from . import llm, memory, missions, tools
 from .agent import Agent
 from .config import HOST, PORT, WEB_DIR, settings
+from .missions import MissionRunner
 from .routines import RoutineRunner
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
@@ -29,11 +30,13 @@ log = logging.getLogger("raxit")
 
 agent = Agent()
 runner = RoutineRunner(agent)
+missionaire = MissionRunner(agent)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     memory.init()
+    missions.init()
     runner.start()
     log.info("Raxit up on http://%s:%s", HOST, PORT)
     try:
@@ -49,6 +52,14 @@ app = FastAPI(title="Raxit", lifespan=lifespan)
 class ChatRequest(BaseModel):
     message: str
     session: str = "default"
+
+
+class MissionRequest(BaseModel):
+    goal: str
+    # Six steps is enough for a real errand and cheap enough to be safe: one
+    # turn costs one request per tool round, and a runaway mission spends the
+    # free tier rather than the battery.
+    max_steps: int = 6
 
 
 @app.get("/")
@@ -84,6 +95,42 @@ async def run_routine(name: str) -> dict[str, Any]:
     if name not in runner.routines:
         raise HTTPException(404, f"No routine named {name}")
     return {"result": await runner.fire(name)}
+
+
+@app.get("/api/missions")
+async def list_missions() -> dict[str, Any]:
+    return {"missions": [m.as_dict() for m in missions.recent()]}
+
+
+@app.post("/api/missions")
+async def start_mission(req: MissionRequest) -> dict[str, Any]:
+    """Hand the agent a goal and let it work unattended.
+
+    Returns as soon as the mission is registered rather than when it finishes
+    — a mission can run for minutes, and the caller polls or watches the
+    activity feed.
+    """
+    goal = req.goal.strip()
+    if not goal:
+        raise HTTPException(422, "A mission needs a goal.")
+    if not 1 <= req.max_steps <= 20:
+        raise HTTPException(422, "max_steps must be between 1 and 20.")
+    return {"mission": missionaire.start(goal, req.max_steps).as_dict()}
+
+
+@app.get("/api/missions/{mission_id}")
+async def get_mission(mission_id: int) -> dict[str, Any]:
+    mission = missions.load(mission_id)
+    if mission is None:
+        raise HTTPException(404, f"No mission {mission_id}")
+    return {"mission": mission.as_dict()}
+
+
+@app.post("/api/missions/{mission_id}/cancel")
+async def cancel_mission(mission_id: int) -> dict[str, Any]:
+    if missions.load(mission_id) is None:
+        raise HTTPException(404, f"No mission {mission_id}")
+    return {"cancelled": missionaire.cancel(mission_id)}
 
 
 @app.post("/api/session/{session}/clear")
