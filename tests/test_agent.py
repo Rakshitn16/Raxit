@@ -156,21 +156,36 @@ async def test_several_tool_calls_in_one_turn_each_get_a_reply(
 
 
 async def test_tool_calls_in_one_turn_run_concurrently(scripted, sandbox_tools):
+    """Three calls in one assistant turn overlap rather than queueing.
+
+    Asserted structurally, by having the tools count how many of them are
+    inside at once, rather than by wall clock. A timing bound is wrong twice
+    over: it flakes on a loaded CI runner — this one measured 0.28s for three
+    50ms sleeps — and it would still pass a serial implementation on a
+    sufficiently fast machine. Peak occupancy cannot be faked by either.
+    """
+    live = peak = 0
+
+    @tool("tracked", "Record how many callers are inside at once.", opt())
+    async def tracked() -> str:
+        nonlocal live, peak
+        live += 1
+        peak = max(peak, live)
+        await asyncio.sleep(0.05)
+        live -= 1
+        return "done"
+
     scripted.add(
         [
-            tool_chunk(0, call_id="c1", name="slow", arguments="{}"),
-            tool_chunk(1, call_id="c2", name="slow", arguments="{}"),
-            tool_chunk(2, call_id="c3", name="slow", arguments="{}"),
+            tool_chunk(0, call_id="c1", name="tracked", arguments="{}"),
+            tool_chunk(1, call_id="c2", name="tracked", arguments="{}"),
+            tool_chunk(2, call_id="c3", name="tracked", arguments="{}"),
         ]
     ).add([text_chunk("done")]).install()
 
-    loop = asyncio.get_running_loop()
-    start = loop.time()
     await collect(Agent(), "s", "q")
-    elapsed = loop.time() - start
 
-    # Three 50ms tools: serial would be 150ms.
-    assert elapsed < 0.12
+    assert peak == 3, f"only {peak} tool(s) ran at once — they queued"
 
 
 async def test_a_failing_tool_comes_back_as_an_error_the_model_can_read(

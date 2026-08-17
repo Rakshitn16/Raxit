@@ -8,6 +8,7 @@ device holding someone's SMS", and it runs unattended.
 from __future__ import annotations
 
 import datetime as dt
+import re
 
 import pytest
 
@@ -60,8 +61,18 @@ def test_now_reports_the_configured_timezone_not_the_hosts():
 
 
 def test_now_is_human_readable_rather_than_an_iso_timestamp():
-    # It gets spoken aloud as often as it gets read.
-    assert "T" not in system.now().split(",")[0]
+    """It is spoken aloud as often as it is read, and nobody wants to hear
+    "2026-08-18T00:04" out of a speaker.
+
+    Asserted on the shape rather than by hunting for a stray "T" — the
+    obvious version of this test matches Tuesday and Thursday and so fails
+    two days in seven.
+    """
+    text = system.now()
+
+    assert text.split()[0].endswith("day"), "should open with a weekday name"
+    assert re.search(r"\d{1,2}:\d{2}", text), "should carry a clock time"
+    assert not re.search(r"\d{4}-\d{2}-\d{2}", text), "that is an ISO date"
 
 
 # --- shell -------------------------------------------------------------------
