@@ -84,9 +84,11 @@ it's live. `POST /api/routines/{name}/run` fires one immediately for testing.
 | | |
 |---|---|
 | **Voice** | `speak`, `listen` |
-| **Attention** | `notify`, `read_notifications`, `toast`, `vibrate` |
-| **Sensors** | `battery`, `location`, `take_photo`, `torch` |
-| **Comms** | `send_sms`\*, `read_sms`, `call`\*, `open_url` |
+| **Attention** | `notify`, `read_notifications`, `dismiss_notification`, `toast`, `vibrate`, `ask_user` |
+| **Sensors** | `battery`, `location`, `sensor`, `take_photo`, `torch` |
+| **Comms** | `contacts`, `send_sms`\*, `read_sms`, `call`\*, `call_log`, `open_url` |
+| **Apps** | `list_apps`, `launch_app`, `share_text`, `send_intent` |
+| **Device** | `device_info`, `device_setting`, `media` |
 | **Memory** | `remember`, `recall`, `forget` |
 | **System** | `shell`, `fetch_url`, `now`, `log`, `clipboard` |
 
@@ -96,6 +98,34 @@ they run. In unattended mode they're refused outright rather than guessed at.
 Adding a tool is one decorated function in `raxit/tools/` — the JSON schema sent
 to the model and the dispatch table are generated from the same declaration,
 so they can't drift.
+
+### Why some tools are grouped
+
+`device_info` covers five termux binaries behind a `kind` enum rather than
+being five tools, and `sensor`, `media` and `device_setting` do the same.
+That is not tidiness — **tool choice degrades with tool count**. Measured here:
+a model that picked correctly 6/6 with a handful of tools loaded dropped to
+2/6 at twenty-two. Grouping buys capability without buying decisions: at
+thirty-four tools the default model still scores 10/10, in a fresh session and
+ten turns into a conversation alike.
+
+## What app control can and can't do
+
+Without root, Termux **cannot tap buttons inside other apps** — injecting
+touch events needs a signature-level permission it will never hold. What it
+can do is drive apps from the outside, through the intent system apps already
+use to talk to each other:
+
+- `launch_app` opens anything by package name.
+- `open_url` takes deep links, which is the useful one — `https://wa.me/<number>?text=…`
+  opens a prefilled WhatsApp chat, `google.navigation:q=<address>` starts turn-by-turn,
+  `spotify:track:<id>` plays a track. A deep link lands on the screen you wanted
+  the tap for.
+- `send_intent` is the escape hatch, including `android.settings.*` screens.
+
+True UI automation is possible without a PC, via **local ADB over wireless
+debugging** (Android 11+) — not wired up here, and it is a setup step rather
+than a code change.
 
 ## Safety
 

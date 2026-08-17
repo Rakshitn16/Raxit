@@ -18,8 +18,10 @@ ALL_TOOLS = sorted(tools.REGISTRY)
 def test_expected_tools_are_registered():
     # Importing `raxit.tools` must pull in every module; a tool defined in a
     # file nobody imports is invisible to the model and fails silently.
-    assert len(ALL_TOOLS) == 22
+    assert len(ALL_TOOLS) == 34
     assert {"speak", "listen", "battery", "remember", "shell"} <= set(ALL_TOOLS)
+    # One per submodule, so a module dropped from tools/__init__.py is caught.
+    assert {"launch_app", "contacts", "sensor"} <= set(ALL_TOOLS)
 
 
 @pytest.mark.parametrize("name", ALL_TOOLS)

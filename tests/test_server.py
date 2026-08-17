@@ -66,7 +66,7 @@ def test_status_describes_the_running_configuration(client):
     body = client.get("/api/status").json()
 
     assert body["model"] and body["base_url"]
-    assert len(body["tools"]) == 22
+    assert len(body["tools"]) == 34
     assert isinstance(body["routines"], list)
 
 
