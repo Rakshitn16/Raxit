@@ -282,11 +282,99 @@ async def test_persistent_rate_limiting_raises_something_actionable(
 ):
     """The free tier's ceiling is the failure a user will actually hit, so the
     message has to say what to do rather than surface a bare 429."""
-    monkeypatch.setattr(settings, "max_retries", 1)
+    monkeypatch.setattr(settings, "max_retries_interactive", 1)
     fake_client([rate_limit_error(), rate_limit_error()])
 
-    with pytest.raises(RateLimited, match="40 requests/minute"):
+    with pytest.raises(RateLimited, match="rate limiting this key"):
         await llm.stream_completion([])
+
+
+# --- patience ----------------------------------------------------------------
+
+
+async def test_an_interactive_turn_gives_up_sooner_than_a_routine(
+    fake_client, monkeypatch
+):
+    """Somebody holding the tablet should be told to try again, not left
+    listening to silence. A 7am routine has nobody to tell, so it waits."""
+    monkeypatch.setattr(settings, "max_retries_interactive", 2)
+    monkeypatch.setattr(settings, "max_retries", 5)
+
+    impatient = fake_client([rate_limit_error()] * 9)
+    with pytest.raises(RateLimited):
+        await llm.stream_completion([])
+    assert len(impatient.seen) == 3  # the first try plus two retries
+
+    patient = fake_client([rate_limit_error()] * 9)
+    with pytest.raises(RateLimited):
+        await llm.stream_completion([], patient=True)
+    assert len(patient.seen) == 6
+
+
+async def test_the_interactive_ladder_stays_within_a_few_seconds(monkeypatch):
+    """Measured on a live turn, the old ladder spent ~31s before giving up.
+    Whatever the numbers become, an interactive wait has to stay short enough
+    that a voice reply is still worth waiting for."""
+    monkeypatch.setattr(llm.random, "uniform", lambda a, b: b)
+    total = sum(
+        llm._backoff(attempt, patient=False, asked=None)
+        for attempt in range(settings.max_retries_interactive)
+    )
+    assert total <= 8
+
+
+async def test_a_routine_is_allowed_to_wait_much_longer(monkeypatch):
+    monkeypatch.setattr(llm.random, "uniform", lambda a, b: b)
+    total = sum(
+        llm._backoff(attempt, patient=True, asked=None)
+        for attempt in range(settings.max_retries)
+    )
+    assert total >= 20
+
+
+async def test_no_delay_is_taken_after_the_final_attempt(fake_client, monkeypatch):
+    """Sleeping after the last try is pure dead time — the answer is already
+    going to be an error."""
+    slept: list[float] = []
+
+    async def record(delay: float) -> None:
+        slept.append(delay)
+
+    monkeypatch.setattr(settings, "max_retries_interactive", 2)
+    fake_client([rate_limit_error()] * 5)
+    monkeypatch.setattr(llm.asyncio, "sleep", record)
+
+    with pytest.raises(RateLimited):
+        await llm.stream_completion([])
+
+    assert len(slept) == 2  # not 3
+
+
+async def test_a_retry_after_header_is_honoured_when_one_is_sent(monkeypatch):
+    """NVIDIA sends none today — a real 429 came back with no retry or
+    rate-limit headers at all — but RAXIT_BASE_URL points at other
+    OpenAI-compatible endpoints, and most of those do."""
+    import httpx
+
+    response = httpx.Response(
+        429, headers={"retry-after": "3"}, request=httpx.Request("POST", "http://x")
+    )
+    exc = openai.RateLimitError("429", response=response, body=None)
+
+    assert llm.retry_after(exc) == 3.0
+    assert llm._backoff(0, patient=False, asked=3.0) == 3.0
+
+
+async def test_an_absent_or_junk_retry_after_falls_back_to_the_ladder():
+    assert llm.retry_after(rate_limit_error()) is None
+    assert llm.retry_after(RuntimeError("no response at all")) is None
+
+
+async def test_an_endpoint_asking_for_an_absurd_wait_is_capped(monkeypatch):
+    """A misbehaving proxy answering `Retry-After: 3600` must not park an
+    interactive turn for an hour."""
+    assert llm._backoff(0, patient=False, asked=3600.0) <= 6
+    assert llm._backoff(0, patient=True, asked=3600.0) <= 30
 
 
 async def test_a_dropped_connection_is_retried(fake_client):
@@ -304,7 +392,7 @@ async def test_a_persistent_connection_failure_gives_up_with_the_cause(
 ):
     import httpx
 
-    monkeypatch.setattr(settings, "max_retries", 1)
+    monkeypatch.setattr(settings, "max_retries_interactive", 1)
     error = openai.APIConnectionError(request=httpx.Request("POST", "http://x"))
     fake_client([error, error])
 

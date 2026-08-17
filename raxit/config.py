@@ -24,7 +24,19 @@ DB_PATH = DATA_DIR / "raxit.db"
 BASE_URL = os.getenv("RAXIT_BASE_URL", "https://integrate.api.nvidia.com/v1")
 API_KEY = os.getenv("NVIDIA_API_KEY") or os.getenv("RAXIT_API_KEY", "")
 
-# Verified to handle multi-round tool calling on NVIDIA's free tier.
+# Chosen for tool-calling reliability, not speed. Measured against the live
+# endpoint with all 22 tools loaded, asking six questions that each require a
+# specific tool:
+#
+#                              fresh session   continuing conversation
+#   nemotron-3-super-120b           6/6                  6/6
+#   nemotron-3.5-lightning-30b      6/6                  2/6
+#
+# Both are perfect one question at a time. A few turns in, lightning stops
+# calling tools and answers from nothing — a battery level, a clock time, a
+# claim to have stored something it never stored. It is ~0.4s faster per tool
+# round, and that is not a trade worth making for an assistant whose whole job
+# is reporting the state of the device you are holding.
 MODEL = os.getenv("RAXIT_MODEL", "nvidia/nemotron-3-super-120b-a12b")
 
 # Nemotron exposes its scratchpad as a separate `reasoning_content` stream.
@@ -42,7 +54,14 @@ MAX_TOKENS = int(os.getenv("RAXIT_MAX_TOKENS", "4096"))
 # The free tier allows ~40 requests/minute and one turn costs one request per
 # tool round, so a runaway loop burns the quota fast as well as the battery.
 MAX_TOOL_ITERATIONS = int(os.getenv("RAXIT_MAX_TOOL_ITERATIONS", "8"))
-MAX_RETRIES = int(os.getenv("RAXIT_MAX_RETRIES", "4"))
+
+# How hard to retry a rate limit, split by whether anyone is waiting. A 7am
+# routine can afford to sit out a 429; a person holding the tablet should be
+# told to try again rather than listen to half a minute of silence. The old
+# single ladder spent ~31s before giving up, which was measured on a live
+# turn and is far too long to be interactive.
+MAX_RETRIES = int(os.getenv("RAXIT_MAX_RETRIES", "5"))
+MAX_RETRIES_INTERACTIVE = int(os.getenv("RAXIT_MAX_RETRIES_INTERACTIVE", "2"))
 
 HOST = os.getenv("RAXIT_HOST", "127.0.0.1")
 PORT = int(os.getenv("RAXIT_PORT", "8788"))
@@ -74,6 +93,7 @@ class Settings:
     max_tokens: int = MAX_TOKENS
     max_tool_iterations: int = MAX_TOOL_ITERATIONS
     max_retries: int = MAX_RETRIES
+    max_retries_interactive: int = MAX_RETRIES_INTERACTIVE
     owner_name: str = OWNER_NAME
     timezone: str = TIMEZONE
     shell_allowlist: set[str] = field(default_factory=lambda: set(SHELL_ALLOWLIST))

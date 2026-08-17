@@ -13,7 +13,7 @@ import pytest
 
 from conftest import empty_chunk, one_tool_call, reasoning_chunk, text_chunk, tool_chunk
 from raxit import llm, memory, tools
-from raxit.agent import Agent
+from raxit.agent import SYSTEM_PROMPT, Agent
 from raxit.config import settings
 from raxit.tools.registry import obj, opt, tool
 
@@ -457,6 +457,20 @@ async def test_other_sessions_are_not_replayed(scripted, sandbox_tools):
     assert "secret" not in contents
 
 
+def test_the_system_prompt_forbids_answering_device_questions_from_memory():
+    """This paragraph is load-bearing, not decoration.
+
+    Measured against the live endpoint: a smaller model a few turns into a
+    conversation stopped calling tools and answered from nothing — a battery
+    percentage, a clock time months off, and an "I've stored that" for
+    something it never stored. Deleting these sentences is how that behaviour
+    comes back, so pin the rule rather than the wording.
+    """
+    prompt = SYSTEM_PROMPT.lower()
+    assert "every turn, not just the first" in prompt
+    assert "saying you did it is not doing it" in prompt
+
+
 async def test_the_system_prompt_leads_and_names_the_owner(scripted, sandbox_tools):
     scripted.add([text_chunk("hi")]).install()
 
@@ -493,6 +507,31 @@ async def test_a_declined_tool_is_not_logged_as_having_run(scripted, sandbox_too
 
 
 # --- thinking ----------------------------------------------------------------
+
+
+async def test_a_routine_waits_out_a_rate_limit_but_a_person_is_not_made_to(
+    scripted, sandbox_tools
+):
+    """`patient` is the agent telling the provider layer whether anyone is
+    listening — the one thing only the caller knows."""
+    scripted.add([text_chunk("a")]).add([text_chunk("b")]).install()
+
+    await collect(Agent(), "s", "q", unattended=True)
+    await collect(Agent(), "s", "q")
+
+    assert scripted.calls[0]["kwargs"]["patient"] is True
+    assert scripted.calls[1]["kwargs"]["patient"] is False
+
+
+async def test_the_forced_answer_inherits_the_turns_patience(
+    scripted, sandbox_tools, monkeypatch
+):
+    monkeypatch.setattr(settings, "max_tool_iterations", 1)
+    scripted.add(one_tool_call("battery", "{}")).add([text_chunk("done")]).install()
+
+    await collect(Agent(), "s", "q", unattended=True)
+
+    assert scripted.calls[-1]["kwargs"]["patient"] is True
 
 
 async def test_a_routines_thinking_choice_reaches_the_provider(

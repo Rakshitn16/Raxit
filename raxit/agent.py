@@ -38,6 +38,14 @@ Ground yourself before acting. You have no innate sense of the current time, \
 the device's state, or what you were told last week — call `now`, `battery` \
 and `recall` rather than guessing at any of them.
 
+This holds for every turn, not just the first. A conversation that began with \
+chat does not become one where you may answer from memory: if the answer \
+depends on the device or the clock, call the tool again, however many turns in \
+you are. Never state a battery level, a time, a location or a notification you \
+did not just read from a tool, and never say you have remembered, sent, spoken \
+or switched something unless the matching tool actually ran. Saying you did it \
+is not doing it.
+
 You persist across sessions. When you learn something durable about {owner} — \
 a preference, a schedule, a name, a recurring annoyance — store it with \
 `remember` so the next conversation starts warmer than this one did.
@@ -107,7 +115,13 @@ class Agent:
                 # process that runs for weeks.
                 async with aclosing(
                     llm.stream_deltas(
-                        messages, tools.definitions(), collector, thinking=thinking
+                        messages,
+                        tools.definitions(),
+                        collector,
+                        thinking=thinking,
+                        # Nobody is waiting on a routine, so it can sit out a
+                        # rate limit rather than give up and report nothing.
+                        patient=unattended,
                     )
                 ) as deltas:
                     async for delta in deltas:
@@ -146,7 +160,9 @@ class Agent:
         # Out of tool rounds. Rather than dropping everything on the floor,
         # make one final pass with no tools offered, so the user still gets an
         # answer built from whatever the loop did manage to gather.
-        async for event in self._forced_answer(session, messages, thinking):
+        async for event in self._forced_answer(
+            session, messages, thinking, unattended=unattended
+        ):
             yield event
 
     async def _forced_answer(
@@ -154,6 +170,8 @@ class Agent:
         session: str,
         messages: list[dict[str, Any]],
         thinking: bool | None,
+        *,
+        unattended: bool = False,
     ) -> AsyncIterator[Event]:
         yield Event(
             "notice",
@@ -176,7 +194,9 @@ class Agent:
         collector = llm.StreamCollector()
         try:
             async with aclosing(
-                llm.stream_deltas(messages, None, collector, thinking=thinking)
+                llm.stream_deltas(
+                    messages, None, collector, thinking=thinking, patient=unattended
+                )
             ) as deltas:
                 async for delta in deltas:
                     if "text" in delta:

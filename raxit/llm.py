@@ -88,6 +88,27 @@ def _extra_body() -> dict[str, Any]:
     }
 
 
+def retry_after(exc: Exception) -> float | None:
+    """Seconds the endpoint asked us to wait, if it said.
+
+    NVIDIA does not send `Retry-After` today — a measured 429 came back with
+    no retry or rate-limit headers at all and a two-field body. This reads it
+    anyway because it costs three lines and every other OpenAI-compatible
+    endpoint you might point `RAXIT_BASE_URL` at does send it.
+    """
+    headers = getattr(getattr(exc, "response", None), "headers", None) or {}
+    try:
+        return max(0.0, float(headers.get("retry-after", "")))
+    except (TypeError, ValueError):
+        return None
+
+
+def _backoff(attempt: int, *, patient: bool, asked: float | None) -> float:
+    if asked is not None:
+        return min(asked, 30.0 if patient else 6.0)
+    return min(2**attempt + random.uniform(0, 1), 20.0 if patient else 5.0)
+
+
 async def stream_completion(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None = None,
@@ -95,8 +116,20 @@ async def stream_completion(
     temperature: float | None = None,
     max_tokens: int | None = None,
     thinking: bool | None = None,
+    patient: bool = False,
 ) -> Any:
-    """Start one streamed chat completion, retrying on 429 and transient 5xx."""
+    """Start one streamed chat completion, retrying on 429 and transient 5xx.
+
+    `patient` picks how long to keep trying, and the caller knows which is
+    right: a routine firing at 7am should wait out a rate limit, while
+    somebody holding the tablet should not listen to half a minute of silence
+    before being told to try again. Interactive turns therefore give up after
+    a few seconds and say so; unattended ones keep going.
+
+    The 429 is worth taking seriously — a burst of 30 requests to the free
+    tier had 11 rejected — and one conversational turn costs one request per
+    tool round, so a multi-round answer trips it on its own.
+    """
     kwargs: dict[str, Any] = {
         "model": settings.model,
         "messages": messages,
@@ -115,26 +148,30 @@ async def stream_completion(
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"
 
+    retries = settings.max_retries if patient else settings.max_retries_interactive
     last: Exception | None = None
-    for attempt in range(settings.max_retries + 1):
+    for attempt in range(retries + 1):
         try:
             return await client().chat.completions.create(**kwargs)
         except openai.RateLimitError as exc:
             last = exc
-            # 40 RPM is easy to trip with multi-round tool use, so back off
-            # harder than a generic 429 would warrant.
-            delay = min(2**attempt * 2 + random.uniform(0, 1), 30)
+            if attempt == retries:
+                break
+            delay = _backoff(attempt, patient=patient, asked=retry_after(exc))
             log.warning("rate limited; retrying in %.1fs", delay)
             await asyncio.sleep(delay)
         except (openai.APIConnectionError, openai.InternalServerError) as exc:
             last = exc
-            await asyncio.sleep(min(2**attempt + random.uniform(0, 1), 15))
+            if attempt == retries:
+                break
+            await asyncio.sleep(_backoff(attempt, patient=patient, asked=None))
 
     if isinstance(last, openai.RateLimitError):
         raise RateLimited(
-            "NVIDIA's free tier (~40 requests/minute) is still returning 429 "
-            "after retries. Wait a minute, or request a limit increase on your "
-            "NVIDIA developer account."
+            "NVIDIA's free tier is rate limiting this key. One turn costs one "
+            "request per tool round, so a couple of multi-step questions in a "
+            "row will do it. Wait a few seconds and ask again, or request a "
+            "limit increase on your NVIDIA developer account."
         ) from last
     raise RuntimeError(f"LLM request failed after retries: {last}") from last
 
@@ -145,16 +182,19 @@ async def stream_deltas(
     collector: StreamCollector,
     *,
     thinking: bool | None = None,
+    patient: bool = False,
 ) -> AsyncIterator[dict[str, str]]:
     """Run a completion, folding chunks into `collector` and yielding deltas.
 
-    Closing the stream is the point of this wrapper: if the consumer stops
-    early the underlying HTTP response would otherwise be abandoned mid-body,
-    which leaks a pooled connection and makes httpx complain loudly at
-    interpreter shutdown. On a process that runs for weeks on a tablet, those
-    add up.
+    Closing the stream is the point of this wrapper: a consumer that stops
+    early — a tab closed mid-answer — would otherwise abandon the response
+    body, holding its pooled connection until the garbage collector got to
+    it. Drive this through `contextlib.aclosing` so the close is prompt
+    rather than eventual.
     """
-    stream = await stream_completion(messages, tools, thinking=thinking)
+    stream = await stream_completion(
+        messages, tools, thinking=thinking, patient=patient
+    )
     try:
         async for chunk in stream:
             delta = collector.add(chunk)

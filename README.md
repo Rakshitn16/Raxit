@@ -8,8 +8,8 @@ lives in Termux on the device, so its tools reach real Android APIs — it can
 speak, listen, notify, text, call, read the clipboard, take a photo, check the
 battery, and run shell commands, all on hardware you're holding.
 
-It runs on **NVIDIA NIM's free tier** — 100+ models, no credit card, ~40
-requests/minute.
+It runs on **NVIDIA NIM's free tier** — 102 models as of writing, no credit
+card, and rate limits you will occasionally notice (see *Cost and limits*).
 
 ```
    voice / web UI  ─────▶  agent loop (on the tablet)  ─────▶  NVIDIA NIM
@@ -110,17 +110,33 @@ so they can't drift.
 
 ## Model and speed
 
-Default is `nvidia/nemotron-3-super-120b-a12b`, verified here to handle
-multi-round tool calling. `python -m raxit.models` lists everything on the
-endpoint (`python -m raxit.models llama` filters).
+Default is `nvidia/nemotron-3-super-120b-a12b`, picked for tool-calling
+reliability rather than speed. `nvidia/nemotron-3.5-lightning-30b-a3b` is
+about 0.4s faster per tool round — and not worth it. Measured live with all 22
+tools loaded, asking six questions that each require a specific tool:
 
-Nemotron can run a separate reasoning pass. Measured on the same one-tool
-question, same answer:
+| | fresh session | continuing conversation |
+|---|---|---|
+| `nemotron-3-super-120b` | 6/6 | **6/6** |
+| `nemotron-3.5-lightning-30b` | 6/6 | **2/6** |
+
+One question at a time, both are perfect. A few turns into a conversation,
+lightning quietly stops calling tools and answers from nothing — inventing a
+battery percentage, a clock time several months off, and a cheerful "I've
+stored that" for something it never stored. Benchmark with your real tool
+registry, not a trimmed one: with four tools loaded lightning looked fine, and
+the failure only appeared at twenty-two.
+
+`python -m raxit.models` lists all 102 models on the endpoint
+(`python -m raxit.models llama` filters).
+
+Nemotron can run a separate reasoning pass. On the same two-tool question,
+same tool choices, comparable answer:
 
 | `RAXIT_THINKING` | latency |
 |---|---|
-| `false` (default) | ~4.1s |
-| `true` | ~10.3s |
+| `false` (default) | ~3.4s |
+| `true` | ~12.4s |
 
 So it's off for interactive use and individual routines opt back in with
 `thinking: true` — worth it for the morning brief that plans several steps, not
@@ -128,10 +144,25 @@ for "is the battery low".
 
 ## Cost and limits
 
-The free tier is ~40 requests/minute, and **one turn costs one request per tool
-round** — a five-round turn is five requests. The agent caps tool rounds at 8
-(`RAXIT_MAX_TOOL_ITERATIONS`) and backs off on 429s. For a personal assistant
-this is comfortably free; it is not sized for anything with real users.
+The free tier rate limits, and **one turn costs one request per tool round** —
+a five-round turn is five requests. A burst of 30 requests had 11 rejected, so
+this is not theoretical; a couple of multi-step questions back to back will
+find it.
+
+NVIDIA returns a bare 429 with no `Retry-After` and no rate-limit headers, so
+there is nothing to read and the backoff is a guess. That makes *how long to
+guess for* a judgement call, and it splits by who is waiting:
+
+- **Interactive** turns retry twice over a few seconds, then say the key is
+  being rate limited and to ask again. Half a minute of silence is a worse
+  answer than "try again".
+- **Routines** retry five times over ~30s. Nobody is there to retry for them.
+
+Both are tunable (`RAXIT_MAX_RETRIES`, `RAXIT_MAX_RETRIES_INTERACTIVE`), and a
+`Retry-After` header is honoured if you point `RAXIT_BASE_URL` at an endpoint
+that sends one. The agent also caps tool rounds at 8
+(`RAXIT_MAX_TOOL_ITERATIONS`). For a personal assistant this is comfortably
+free; it is not sized for anything with real users.
 
 ## Developing
 
