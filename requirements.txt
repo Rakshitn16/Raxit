@@ -6,6 +6,13 @@ apscheduler>=3.10.4
 httpx>=0.27.0
 python-dotenv>=1.0.1
 
+# Android ships no system timezone database, so Python's zoneinfo has nothing
+# to read — every ZoneInfo() call raises ZoneInfoNotFoundError, which takes
+# the scheduler down before the server can even start (RoutineRunner builds
+# an AsyncIOScheduler(timezone=...) at import). Pure data, no compilation, so
+# it costs nothing on the platforms that already have a system database.
+tzdata>=2024.1
+
 # Plain uvicorn, not uvicorn[standard]. The extra drags in uvloop, httptools
 # and watchfiles, none of which publish a wheel Termux can use — pip falls
 # back to building them, and watchfiles wants a Rust toolchain the install
