@@ -10,8 +10,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
@@ -98,27 +99,48 @@ async def websocket_chat(ws: WebSocket) -> None:
     Client sends `{message, session}`. The server streams agent events back,
     and may interrupt with an `approval_request` that the client answers with
     `{type: "approval", approved: bool}`.
+
+    Reading runs in its own task rather than inline between turns, because
+    approval is answered *during* a turn: the agent pauses on a gated tool and
+    waits for the browser. A loop that only read between turns could never
+    receive that answer — every SMS would stall for the approval timeout and
+    then be refused, with the UI's Allow button doing nothing.
     """
     await ws.accept()
-    pending: asyncio.Queue[bool] = asyncio.Queue()
+    approvals: asyncio.Queue[bool] = asyncio.Queue()
+    inbox: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+
+    async def reader() -> None:
+        try:
+            while True:
+                msg = json.loads(await ws.receive_text())
+                if msg.get("type") == "approval":
+                    await approvals.put(bool(msg.get("approved")))
+                else:
+                    await inbox.put(msg)
+        except (WebSocketDisconnect, json.JSONDecodeError, RuntimeError):
+            pass
+        finally:
+            # Unblock both waiters: no more turns are coming, and anything
+            # still waiting on a human has just lost the human.
+            await inbox.put(None)
+            await approvals.put(False)
 
     async def approve(name: str, payload: dict[str, Any]) -> bool:
         await ws.send_json(
             {"type": "approval_request", "data": {"name": name, "input": payload}}
         )
         try:
-            return await asyncio.wait_for(pending.get(), timeout=120)
-        except asyncio.TimeoutError:
+            return await asyncio.wait_for(approvals.get(), timeout=120)
+        except TimeoutError:
             return False
 
+    pump = asyncio.create_task(reader())
     try:
         while True:
-            raw = await ws.receive_text()
-            msg = json.loads(raw)
-
-            if msg.get("type") == "approval":
-                await pending.put(bool(msg.get("approved")))
-                continue
+            msg = await inbox.get()
+            if msg is None:  # socket closed
+                return
 
             session = msg.get("session", "default")
             text = (msg.get("message") or "").strip()
@@ -135,6 +157,8 @@ async def websocket_chat(ws: WebSocket) -> None:
                 )
     except WebSocketDisconnect:
         return
+    finally:
+        pump.cancel()
 
 
 @app.post("/api/chat")

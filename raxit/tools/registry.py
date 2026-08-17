@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 
 @dataclass
@@ -84,6 +85,22 @@ def obj(**properties: dict[str, Any]) -> dict[str, Any]:
 def opt(**properties: dict[str, Any]) -> dict[str, Any]:
     """Object schema with no required properties."""
     return {"type": "object", "properties": properties, "required": []}
+
+
+def mix(required: dict[str, Any], **optional: dict[str, Any]) -> dict[str, Any]:
+    """Object schema where only `required` must be supplied.
+
+    Worth the third helper: marking a parameter required when the function has
+    a working default forces the model to invent a value for it. `speak` was
+    the case that showed it — pitch and rate were advertised as required, so
+    every spoken line came out at whatever the model guessed rather than the
+    voice the user configured.
+    """
+    return {
+        "type": "object",
+        "properties": {**required, **optional},
+        "required": list(required),
+    }
 
 
 def run_blocking(fn: Callable[..., Any], *args: Any) -> Awaitable[Any]:

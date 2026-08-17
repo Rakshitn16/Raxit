@@ -13,8 +13,9 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any, Iterator
+from typing import Any
 
 from .config import DB_PATH
 
@@ -95,32 +96,53 @@ def clear_session(session: str) -> None:
 def _repair(msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Make a message-list slice replayable.
 
-    Two ways a stored history goes invalid, both rejected by the API:
+    A tool round is an `assistant` turn carrying `tool_calls` plus one `tool`
+    message per call. The API rejects the history unless every round is
+    complete, and a stored transcript breaks that in three ways:
 
-    * The head is cut mid-tool-round, so the slice opens on a `tool` message
-      whose originating `assistant` turn was left behind. Fix by skipping
-      forward to the first `user` message.
-    * The tail is an `assistant` turn with `tool_calls` that never got their
-      `tool` replies — what a crash mid-loop leaves behind. Fix by dropping
-      the dangling turn.
+    * The head is cut mid-round, so the slice opens on a `tool` message whose
+      `assistant` turn was left behind — the ordinary cost of keeping only a
+      tail. Fixed by skipping forward to the first `user` message.
+    * A round was only partly answered, because results are written one at a
+      time and Termux killed the process between two of them.
+    * A round was not answered at all, which is where a crash mid-loop lands.
+
+    The last two are dropped wholesale — the assistant turn and any orphaned
+    replies with it. A partial round matters more than it looks: it sits in
+    the middle of the transcript rather than at the end, so it is reloaded on
+    every subsequent turn and keeps failing until it falls out of the window.
     """
     start = next((i for i, m in enumerate(msgs) if m.get("role") == "user"), None)
     if start is None:
         return []
     msgs = msgs[start:]
 
-    while msgs:
-        last = msgs[-1]
-        if last.get("role") != "assistant" or not last.get("tool_calls"):
-            break
-        answered = {
-            m.get("tool_call_id") for m in msgs if m.get("role") == "tool"
-        }
-        if all(c["id"] in answered for c in last["tool_calls"]):
-            break
-        msgs.pop()
+    answered = {m.get("tool_call_id") for m in msgs if m.get("role") == "tool"}
+    orphaned: set[str] = set()
+    kept: list[dict[str, Any]] = []
 
-    return msgs
+    for message in msgs:
+        calls = message.get("tool_calls") if message.get("role") == "assistant" else None
+        if calls and not all(c["id"] in answered for c in calls):
+            orphaned.update(c["id"] for c in calls)
+            continue
+        kept.append(message)
+
+    # A `tool` message whose round was just dropped, or one that never had a
+    # round to begin with, has nothing left to attach to.
+    live = _called(kept) - orphaned
+    return [
+        m for m in kept if m.get("role") != "tool" or m.get("tool_call_id") in live
+    ]
+
+
+def _called(msgs: list[dict[str, Any]]) -> set[str]:
+    return {
+        call["id"]
+        for m in msgs
+        if m.get("role") == "assistant"
+        for call in m.get("tool_calls") or []
+    }
 
 
 # --- long-term facts ---------------------------------------------------------

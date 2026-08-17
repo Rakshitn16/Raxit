@@ -52,7 +52,10 @@ class Routine:
         )
 
 
-def load_all(directory: Path = ROUTINES_DIR) -> list[Routine]:
+def load_all(directory: Path | None = None) -> list[Routine]:
+    # Resolved per call rather than bound as a default, so the directory can
+    # be repointed after import.
+    directory = ROUTINES_DIR if directory is None else directory
     routines: list[Routine] = []
     for path in sorted(directory.glob("*.y*ml")):
         try:

@@ -17,7 +17,7 @@ import shutil
 import subprocess
 from typing import Any
 
-from .registry import obj, opt, run_blocking, tool
+from .registry import mix, obj, opt, run_blocking, tool
 
 TIMEOUT = 30
 
@@ -58,8 +58,8 @@ def _json(args: list[str]) -> Any:
     "Speak text aloud through the tablet's speaker. Use this whenever the user "
     "is interacting by voice, or for anything they need to hear without looking "
     "at the screen.",
-    obj(
-        text={"type": "string", "description": "What to say."},
+    mix(
+        {"text": {"type": "string", "description": "What to say."}},
         pitch={"type": "number", "description": "0.5-2.0, default 1.0."},
         rate={"type": "number", "description": "0.5-2.0, default 1.0."},
     ),
@@ -102,9 +102,8 @@ async def listen() -> str:
     "notify",
     "Post an Android notification. Use for anything the user should see later "
     "rather than right now — a routine's result, a reminder, a finished task.",
-    obj(
-        title={"type": "string"},
-        content={"type": "string"},
+    mix(
+        {"title": {"type": "string"}, "content": {"type": "string"}},
         priority={
             "type": "string",
             "enum": ["min", "low", "default", "high", "max"],
@@ -140,7 +139,8 @@ async def read_notifications() -> str:
         if not items:
             return "No notifications."
         lines = [
-            f"- [{n.get('packageName', '?')}] {n.get('title', '')}: {n.get('content', '')}"
+            f"- [{n.get('packageName', '?')}] "
+            f"{n.get('title', '')}: {n.get('content', '')}"
             for n in items
         ]
         return "\n".join(lines)

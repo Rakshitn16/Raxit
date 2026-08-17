@@ -11,7 +11,7 @@ import httpx
 
 from .. import memory
 from ..config import settings
-from .registry import obj, opt, run_blocking, tool
+from .registry import mix, obj, opt, run_blocking, tool
 
 
 @tool(
@@ -19,9 +19,14 @@ from .registry import obj, opt, run_blocking, tool
     "Store a durable fact about the user, their preferences, or their world. "
     "Use this for things worth knowing next week, not for conversational "
     "context — the transcript already carries that.",
-    obj(
-        key={"type": "string", "description": "Short stable identifier, e.g. 'home_wifi'."},
-        value={"type": "string"},
+    mix(
+        {
+            "key": {
+                "type": "string",
+                "description": "Short stable identifier, e.g. 'home_wifi'.",
+            },
+            "value": {"type": "string"},
+        },
         tags={"type": "string", "description": "Comma-separated, for later filtering."},
     ),
 )

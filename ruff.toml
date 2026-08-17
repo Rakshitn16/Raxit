@@ -1,0 +1,22 @@
+line-length = 90
+target-version = "py311"
+
+[lint]
+select = ["E", "F", "I", "UP", "B", "C4", "RUF"]
+
+# Deliberately not enabled:
+#   BLE001 (blind `except Exception`) — the agent loop and the routine runner
+#     catch everything on purpose. A tool that raises anything at all has to
+#     come back to the model as an error result, and a routine that explodes
+#     at 7am must not take the scheduler down with it.
+#   PLW1510 (`subprocess.run` without `check`) — the termux wrappers read
+#     `returncode` themselves so they can put the binary's own stderr into the
+#     message the model sees.
+
+[lint.per-file-ignores]
+# Tests read better with the assertion inline than with a named intermediate.
+"tests/*" = ["RUF015"]
+
+[lint.isort]
+# `conftest` is this repo's own test helper module, not a third-party package.
+known-first-party = ["raxit", "conftest"]

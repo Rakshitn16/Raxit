@@ -15,8 +15,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import AsyncIterator, Callable
+from contextlib import aclosing
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Callable
+from typing import Any
 
 from . import llm, memory, tools
 from .config import settings
@@ -97,13 +99,22 @@ class Agent:
         for _ in range(settings.max_tool_iterations):
             collector = llm.StreamCollector()
             try:
-                async for delta in llm.stream_deltas(
-                    messages, tools.definitions(), collector, thinking=thinking
-                ):
-                    if "reasoning" in delta:
-                        yield Event("thinking", {"text": delta["reasoning"]})
-                    if "text" in delta:
-                        yield Event("text", {"text": delta["text"]})
+                # `aclosing` rather than a bare `async for`: this generator is
+                # itself being consumed by the websocket handler, and a client
+                # that closes the tab mid-answer stops consuming. Without an
+                # explicit close the HTTP response is only finalised whenever
+                # the GC gets to it, holding a pooled connection open on a
+                # process that runs for weeks.
+                async with aclosing(
+                    llm.stream_deltas(
+                        messages, tools.definitions(), collector, thinking=thinking
+                    )
+                ) as deltas:
+                    async for delta in deltas:
+                        if "reasoning" in delta:
+                            yield Event("thinking", {"text": delta["reasoning"]})
+                        if "text" in delta:
+                            yield Event("text", {"text": delta["text"]})
             except Exception as exc:
                 log.exception("completion failed")
                 yield Event("error", {"message": str(exc)})
@@ -119,7 +130,7 @@ class Agent:
                 return
 
             results = await self._execute(calls, unattended=unattended, approve=approve)
-            for call, result in zip(calls, results):
+            for call, result in zip(calls, results, strict=True):
                 yield Event(
                     "tool_result",
                     {
@@ -164,11 +175,12 @@ class Agent:
         ]
         collector = llm.StreamCollector()
         try:
-            async for delta in llm.stream_deltas(
-                messages, None, collector, thinking=thinking
-            ):
-                if "text" in delta:
-                    yield Event("text", {"text": delta["text"]})
+            async with aclosing(
+                llm.stream_deltas(messages, None, collector, thinking=thinking)
+            ) as deltas:
+                async for delta in deltas:
+                    if "text" in delta:
+                        yield Event("text", {"text": delta["text"]})
         except Exception as exc:
             yield Event("error", {"message": str(exc)})
             return

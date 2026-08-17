@@ -111,6 +111,11 @@ function handle({ type, data }) {
     current = null;   // a new bubble follows the tool round
   } else if (type === 'approval_request') {
     askApproval(data);
+  } else if (type === 'notice') {
+    // Sent when a turn runs out of tool rounds. Without it the reply just
+    // stops short and looks like the agent losing interest.
+    el('tool', data.message);
+    current = null;
   } else if (type === 'done') {
     current = null;
   } else if (type === 'error') {

@@ -133,6 +133,21 @@ round** — a five-round turn is five requests. The agent caps tool rounds at 8
 (`RAXIT_MAX_TOOL_ITERATIONS`) and backs off on 429s. For a personal assistant
 this is comfortably free; it is not sized for anything with real users.
 
+## Developing
+
+```bash
+pip install -r requirements-dev.txt
+pytest                  # ~300 tests, a few seconds, no network
+ruff check raxit tests
+```
+
+The suite never reaches a provider: completions are faked at the chunk level,
+so the real streaming reassembly, message shapes and approval gate all run.
+The `termux-*` binaries are faked the same way, which means the whole thing
+passes on a laptop and in CI, neither of which has an Android to talk to.
+
+Both run on every push (`.github/workflows/ci.yml`), against 3.11 and 3.12.
+
 ## Layout
 
 ```
@@ -148,5 +163,6 @@ raxit/
     android.py   termux-api wrappers
     system.py    memory, shell, http, time
 routines/        your scheduled prompts
+tests/           pytest suite, no device and no network needed
 web/index.html   the UI
 ```

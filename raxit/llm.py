@@ -16,7 +16,8 @@ import asyncio
 import logging
 import random
 import re
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 import httpx
 import openai
@@ -141,7 +142,7 @@ async def stream_completion(
 async def stream_deltas(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None,
-    collector: "StreamCollector",
+    collector: StreamCollector,
     *,
     thinking: bool | None = None,
 ) -> AsyncIterator[dict[str, str]]:
